@@ -1,5 +1,5 @@
-const umfpack_default_ctrl = copy(UMFPACK.umf_ctrl)
-const umfpack_default_info = copy(UMFPACK.umf_info)
+import SuiteSparse: UMFPACK
+import SuiteSparse.UMFPACK: get_umfpack_control, Symbolic, Numeric, UmfpackWS
 
 @kwdef mutable struct UmfpackOptions <: AbstractOptions
     umfpack_pivtol::Float64 = 1e-4
@@ -33,7 +33,7 @@ for (numeric,solve,T) in (
     @eval begin
         umfpack_numeric(
             colptr::Vector{Int32},rowval::Vector{Int32},
-            nzval::Vector{$T},symbolic::Ptr{Nothing},
+            nzval::Vector{$T},symbolic::Symbolic{$T, Int32},
             tmp::Vector{Ptr{Nothing}},ctrl::Vector{$T},
             info::Vector{$T}) = ccall(
                 ($(string(numeric)),:libumfpack),
@@ -58,17 +58,20 @@ end
 function UmfpackSolver(
     csc::SparseMatrixCSC{T};
     opt=UmfpackOptions(), logger=MadNLPLogger(),
+    control=get_umfpack_control(T, Int32)
 ) where T
     p = Vector{T}(undef,csc.n)
     full,tril_to_full_view = get_tril_to_full(csc)
 
     full.colptr.-=1; full.rowval.-=1
 
-    inner = UMFPACK.UmfpackLU(C_NULL,C_NULL,full.n,full.n,full.colptr,full.rowval,full.nzval,0)
+    inner = UMFPACK.UmfpackLU(Symbolic{T, Int32}(C_NULL),Numeric{T, Int32}(C_NULL),full.n,full.n,full.colptr,full.rowval,full.nzval,0, UmfpackWS(csc, UMFPACK.has_refinement(control)),
+    copy(control), Vector{Float64}(undef, UMFPACK.UMFPACK_INFO),
+    UMFPACK.ReentrantLock())
     UMFPACK.finalizer(UMFPACK.umfpack_free_symbolic,inner)
-    UMFPACK.umfpack_symbolic!(inner)
-    ctrl = copy(umfpack_default_ctrl)
-    info = copy(umfpack_default_info)
+    UMFPACK.umfpack_symbolic!(inner, nothing)
+    ctrl = control
+    info = Vector{Float64}(undef, UMFPACK.UMFPACK_INFO)
     ctrl[4]=opt.umfpack_pivtol
     ctrl[12]=opt.umfpack_sym_pivtol
     ctrl[5]=opt.umfpack_block_size
@@ -79,11 +82,11 @@ function UmfpackSolver(
     return UmfpackSolver(inner,csc,full,tril_to_full_view,p,tmp,ctrl,info,opt,logger)
 end
 
-function factorize!(M::UmfpackSolver)
-    UMFPACK.umfpack_free_numeric(M.inner)
+function factorize!(M::UmfpackSolver{T}) where T
+    UMFPACK.umfpack_free_numeric(M.inner.numeric, T, Int32)
     M.full.nzval.=M.tril_to_full_view
     status = umfpack_numeric(M.inner.colptr,M.inner.rowval,M.inner.nzval,M.inner.symbolic,M.tmp,M.ctrl,M.info)
-    M.inner.numeric = M.tmp[]
+    M.inner.numeric.p = M.tmp[]
 
     M.inner.status = status
     return M
